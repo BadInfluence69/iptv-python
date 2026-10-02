@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channel tuner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tuner.css') }}">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📺</text></svg>">
+</head>
+<body>
+
+<header class="tuner-bar">
+  <div class="brand">
+    <span class="dial" aria-hidden="true"></span>
+    <h1>Channel tuner</h1>
+  </div>
+
+  <div class="search-wrap">
+    <input id="search" type="search" autocomplete="off" spellcheck="false"
+           placeholder="Search {{ '{:,}'.format(facets.channel_count) }} channels by name, country or category">
+  </div>
+
+  <div class="bar-meta">
+    <span id="result-count">{{ '{:,}'.format(facets.channel_count) }} channels</span>
+    <span class="sep"></span>
+    <span>{{ '{:,}'.format(facets.stream_count) }} sources</span>
+    <button id="btn-refresh-data" class="ghost" title="Re-download logos and categories">Update channel data</button>
+  </div>
+</header>
+
+<div class="layout">
+
+  <aside class="rail" id="rail">
+    <div class="rail-group">
+      <button class="chip" data-view="all" id="view-all">All channels</button>
+      <button class="chip" data-view="favorites" id="view-favorites">Favorites</button>
+      <button class="chip" data-view="recent" id="view-recent">Recently watched</button>
+    </div>
+
+    <div class="rail-group">
+      <label for="f-country">Country</label>
+      <select id="f-country">
+        <option value="">Everywhere</option>
+        {% for c in facets.countries %}
+        <option value="{{ c.code }}">{{ c.flag }} {{ c.name }} ({{ c.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="rail-group">
+      <label for="f-category">Category</label>
+      <select id="f-category">
+        <option value="">Anything</option>
+        {% for c in facets.categories %}
+        <option value="{{ c.name }}">{{ c.name }} ({{ c.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="rail-group">
+      <label for="f-quality">Picture</label>
+      <select id="f-quality">
+        <option value="">Any quality</option>
+        {% for q in facets.qualities %}
+        <option value="{{ q.name }}">{{ q.name }} ({{ q.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="rail-group">
+      <label for="f-source">Provider</label>
+      <select id="f-source">
+        <option value="">Every provider</option>
+        {% for s in facets.sources %}
+        <option value="{{ s.name }}">{{ s.name }} ({{ s.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="rail-group switches">
+      <label class="switch">
+        <input type="checkbox" id="opt-direct">
+        <span>Play without the local relay</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="opt-adult" {% if settings.get('adult') %}checked{% endif %}>
+        <span>Include adult channels</span>
+      </label>
+    </div>
+
+    <button id="btn-clear" class="ghost wide">Clear filters</button>
+
+    {% if not facets.has_metadata %}
+    <p class="rail-note">Channel logos and categories are not cached yet. Use “Update channel data” when you have a connection.</p>
+    {% endif %}
+  </aside>
+
+  <main class="main">
+
+    <section id="player" class="player" hidden>
+      <div class="screen">
+        <video id="video" controls playsinline></video>
+        <div id="screen-status" class="screen-status" hidden></div>
+      </div>
+
+      <div class="now-playing">
+        <div class="np-head">
+          <h2 id="np-name">Nothing tuned</h2>
+          <button id="np-close" class="ghost" title="Close the player">Close</button>
+        </div>
+        <p id="np-meta" class="np-meta"></p>
+
+        <div class="np-actions">
+          <button id="btn-fav" class="action">Add to favorites</button>
+          <button id="btn-vlc-local" class="action" {% if not vlc_available %}data-missing="1"{% endif %}>Play in VLC</button>
+          <a id="btn-vlc-file" class="action" download>Download .m3u</a>
+          <button id="btn-copy" class="action">Copy stream link</button>
+          <button id="btn-test" class="action">Test this source</button>
+        </div>
+
+        <div class="np-sources">
+          <label for="source-list">Sources for this channel</label>
+          <div id="source-list" class="source-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid-wrap">
+      <div id="grid" class="grid" aria-live="polite"></div>
+      <div id="empty" class="empty" hidden>
+        <p>No channels match that. Try a shorter search or clear the filters.</p>
+      </div>
+      <button id="btn-more" class="more" hidden>Show more channels</button>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="{{ url_for('static', filename='vendor/hls.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/dash.all.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/tuner.js') }}"></script>
+</body>
+</html>
