@@ -1,0 +1,549 @@
+import { normalizeURL, isURI } from '../utils'
+import { Collection } from '@freearhey/core'
+import parser from 'iptv-playlist-parser'
+import * as sdk from '@iptv-org/sdk'
+import { DataSet } from '../core'
+import { data } from '../api'
+import path from 'node:path'
+import { PlaylistOptions } from './playlist'
+
+export class Stream extends sdk.Models.Stream {
+  filepath?: string
+  line?: number
+  groupTitle: string = 'Undefined'
+  removed: boolean = false
+  tvgId?: string
+  statusCode?: string
+  guides = new Collection<sdk.Models.Guide>()
+  isNot247?: boolean
+  isGeoBlocked?: boolean
+  hasMainFeed?: boolean = false
+  hasUniqueName?: boolean = false
+  channelName?: string
+  feedName?: string
+  countryName?: string
+  channelUniqueName?: string
+
+  setGuides(guides?: sdk.Models.Guide[]) {
+    this.guides = new Collection(guides)
+  }
+
+  getGuides(): Collection<sdk.Models.Guide> {
+    return this.guides
+  }
+
+  validate(): Collection<Error> {
+    const errors = new Collection<Error>()
+    if (!isURI(this.url)) {
+      errors.add(new Error(`The stream URL "${this.url}" is invalid`))
+    }
+
+    return errors
+  }
+
+  updateWithIssue(dataSet: DataSet): this {
+    if (dataSet.isDeleted('stream_id')) {
+      this.channel = ''
+      this.feed = ''
+      this.updateTvgId().updateTitle().updateFilepath()
+    } else if (dataSet.has('stream_id')) {
+      const streamId = dataSet.getString('stream_id') || ''
+      const [channelId, feedId] = streamId.split('@')
+
+      if (channelId) {
+        this.channel = channelId
+        this.feed = feedId
+        this.updateTvgId().updateTitle().updateFilepath()
+      }
+    }
+
+    const live247 = dataSet.getBoolean('live_247')
+    const geoBlocked = dataSet.getBoolean('geo_blocked')
+
+    if (live247 !== undefined) this.isNot247 = !live247
+    if (geoBlocked !== undefined) this.isGeoBlocked = geoBlocked
+
+    const quality = dataSet.isDeleted('quality') ? '' : dataSet.getString('quality')
+    const httpUserAgent = dataSet.isDeleted('http_user_agent')
+      ? ''
+      : dataSet.getString('http_user_agent')
+    const httpReferrer = dataSet.isDeleted('http_referrer')
+      ? ''
+      : dataSet.getString('http_referrer')
+
+    if (quality !== undefined) this.quality = quality
+    if (httpUserAgent !== undefined) this.user_agent = httpUserAgent
+    if (httpReferrer !== undefined) this.referrer = httpReferrer
+
+    return this
+  }
+
+  static fromPlaylistItem(data: parser.PlaylistItem): Stream {
+    function escapeRegExp(text: string) {
+      return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+    }
+
+    function parseName(name: string): {
+      title: string
+      labels: string[]
+      quality: string
+    } {
+      let title = name
+      const [, labels] = title.match(/ \[(.*)\]$/) || [null, '']
+      title = title.replace(new RegExp(` \\[${escapeRegExp(labels)}\\]$`), '')
+      const [, quality] = title.match(/ \(([0-9]+[pi])\)$/) || [null, '']
+      title = title.replace(new RegExp(` \\(${quality}\\)$`), '')
+
+      return { title, labels: labels.split(';'), quality }
+    }
+
+    if (!data.name) throw new Error('"name" property is required')
+    if (!data.url) throw new Error('"url" property is required')
+
+    const tvgId = data.tvg?.id || ''
+    const [channelId, feedId] = tvgId.split('@')
+    const { title, labels, quality } = parseName(data.name)
+
+    const stream = new Stream({
+      channel: channelId || null,
+      feed: feedId || null,
+      title: title,
+      quality: quality || null,
+      url: data.url,
+      referrer: data.http?.referrer || null,
+      user_agent: data.http?.['user-agent'] || null,
+      label: null
+    })
+
+    stream.tvgId = tvgId
+    stream.line = data.line
+    stream.isNot247 = labels.includes('Not 24/7')
+    stream.isGeoBlocked = labels.includes('Geo-blocked')
+
+    const feed = stream.getFeed()
+    stream.hasMainFeed = feed?.is_main
+    stream.feedName = feed?.name
+
+    const channel = stream.getChannel()
+    stream.channelName = channel?.name
+
+    const country = channel?.getCountry()
+    stream.countryName = country?.name
+    stream.channelUniqueName = `${channel?.name} (${country?.name})`
+
+    return stream
+  }
+
+  isSFW(): boolean {
+    const channel = this.getChannel()
+
+    if (!channel) return true
+
+    return !channel.is_nsfw
+  }
+
+  getUniqKey(): string {
+    const filepath = this.getFilepath()
+    const tvgId = this.getTvgId()
+
+    return filepath + tvgId + this.url
+  }
+
+  getVerticalResolution(): number {
+    if (!this.quality) return 0
+
+    const [, verticalResolutionString] = this.quality.match(/^(\d+)/) || ['', '0']
+
+    return parseInt(verticalResolutionString)
+  }
+
+  getBroadcastCountries(): Collection<sdk.Models.Country> {
+    const countries = new Collection<sdk.Models.Country>()
+
+    const feed = this.getFeed()
+    if (!feed) return countries
+
+    feed
+      .getBroadcastArea()
+      .getLocations()
+      .forEach((location: sdk.Models.BroadcastAreaLocation) => {
+        let country: sdk.Models.Country | undefined
+        switch (location.type) {
+          case 'country': {
+            country = data.countriesKeyByCode.get(location.code)
+            break
+          }
+          case 'subdivision': {
+            const subdivision = data.subdivisionsKeyByCode.get(location.code)
+            if (!subdivision) break
+            country = data.countriesKeyByCode.get(subdivision.country)
+            break
+          }
+          case 'city': {
+            const city = data.citiesKeyByCode.get(location.code)
+            if (!city) break
+            country = data.countriesKeyByCode.get(city.country)
+            break
+          }
+        }
+
+        if (country) countries.add(country)
+      })
+
+    return countries.uniqBy((country: sdk.Models.Country) => country.code)
+  }
+
+  getBroadcastSubdivisions(): Collection<sdk.Models.Subdivision> {
+    const subdivisions = new Collection<sdk.Models.Subdivision>()
+
+    const feed = this.getFeed()
+    if (!feed) return subdivisions
+
+    feed
+      .getBroadcastArea()
+      .getLocations()
+      .forEach((location: sdk.Models.BroadcastAreaLocation) => {
+        switch (location.type) {
+          case 'subdivision': {
+            const subdivision = data.subdivisionsKeyByCode.get(location.code)
+            if (!subdivision) break
+            subdivisions.add(subdivision)
+            if (!subdivision.parent) break
+            const parentSubdivision = data.subdivisionsKeyByCode.get(subdivision.parent)
+            if (!parentSubdivision) break
+            subdivisions.add(parentSubdivision)
+            break
+          }
+          case 'city': {
+            const city = data.citiesKeyByCode.get(location.code)
+            if (!city || !city.subdivision) break
+            const subdivision = data.subdivisionsKeyByCode.get(city.subdivision)
+            if (!subdivision) break
+            subdivisions.add(subdivision)
+            if (!subdivision.parent) break
+            const parentSubdivision = data.subdivisionsKeyByCode.get(subdivision.parent)
+            if (!parentSubdivision) break
+            subdivisions.add(parentSubdivision)
+            break
+          }
+        }
+      })
+
+    return subdivisions.uniqBy((subdivision: sdk.Models.Subdivision) => subdivision.code)
+  }
+
+  getBroadcastCities(): Collection<sdk.Models.City> {
+    const cities = new Collection<sdk.Models.City>()
+
+    const feed = this.getFeed()
+    if (!feed) return cities
+
+    feed
+      .getBroadcastArea()
+      .getLocations()
+      .forEach((location: sdk.Models.BroadcastAreaLocation) => {
+        if (location.type !== 'city') return
+
+        const city = data.citiesKeyByCode.get(location.code)
+
+        if (city) cities.add(city)
+      })
+
+    return cities.uniqBy((city: sdk.Models.City) => city.code)
+  }
+
+  getBroadcastRegions(): Collection<sdk.Models.Region> {
+    const regions = new Collection<sdk.Models.Region>()
+
+    const feed = this.getFeed()
+    if (!feed) return regions
+
+    feed
+      .getBroadcastArea()
+      .getLocations()
+      .forEach((location: sdk.Models.BroadcastAreaLocation) => {
+        switch (location.type) {
+          case 'region': {
+            const region = data.regionsKeyByCode.get(location.code)
+            if (!region) break
+            regions.add(region)
+
+            const relatedRegions = data.regions.filter((_region: sdk.Models.Region) =>
+              new Collection<string>(_region.countries)
+                .intersects(new Collection<string>(region.countries))
+                .isNotEmpty()
+            )
+            relatedRegions.forEach(region => {
+              regions.add(region)
+            })
+            break
+          }
+          case 'country': {
+            const country = data.countriesKeyByCode.get(location.code)
+            if (!country) break
+            const countryRegions = data.regions.filter((_region: sdk.Models.Region) =>
+              new Collection<string>(_region.countries).includes(
+                (code: string) => code === country.code
+              )
+            )
+            countryRegions.forEach(region => {
+              regions.add(region)
+            })
+            break
+          }
+          case 'subdivision': {
+            const subdivision = data.subdivisionsKeyByCode.get(location.code)
+            if (!subdivision) break
+            const subdivisionRegions = data.regions.filter((_region: sdk.Models.Region) =>
+              new Collection<string>(_region.countries).includes(
+                (code: string) => code === subdivision.country
+              )
+            )
+            subdivisionRegions.forEach(region => {
+              regions.add(region)
+            })
+            break
+          }
+          case 'city': {
+            const city = data.citiesKeyByCode.get(location.code)
+            if (!city) break
+            const cityRegions = data.regions.filter((_region: sdk.Models.Region) =>
+              new Collection<string>(_region.countries).includes(
+                (code: string) => code === city.country
+              )
+            )
+            cityRegions.forEach(region => {
+              regions.add(region)
+            })
+            break
+          }
+        }
+      })
+
+    return regions.uniqBy((region: sdk.Models.Region) => region.code)
+  }
+
+  isInternational(): boolean {
+    const feed = this.getFeed()
+    if (!feed) return false
+
+    const broadcastAreaCodes = feed.getBroadcastArea().codes
+    if (broadcastAreaCodes.join(';').includes('r/')) return true
+    if (broadcastAreaCodes.filter(code => code.includes('c/')).length > 1) return true
+
+    return false
+  }
+
+  hasChannel(): boolean {
+    return !!this.channel && !!this.getChannel()
+  }
+
+  hasFeed(): boolean {
+    return !!this.feed && !!this.getFeed()
+  }
+
+  hasCategory(category: sdk.Models.Category): boolean {
+    const channel = this.getChannel()
+
+    if (!channel) return false
+
+    const found = channel.categories.find((id: string) => id === category.id)
+
+    return !!found
+  }
+
+  hasLanguage(language: sdk.Models.Language): boolean {
+    const found = this.getLanguages().find(
+      (_language: sdk.Models.Language) => _language.code === language.code
+    )
+
+    return !!found
+  }
+
+  updateTvgId(): this {
+    if (!this.channel) {
+      this.tvgId = ''
+    } else if (this.feed) {
+      this.tvgId = `${this.channel}@${this.feed}`
+    } else {
+      this.tvgId = this.channel
+    }
+
+    return this
+  }
+
+  updateFilepath(): this {
+    if (this.filepath) return this
+
+    const channel = this.getChannel()
+    if (!channel) return this
+
+    this.filepath = `${channel.country.toLowerCase()}.m3u`
+
+    return this
+  }
+
+  updateTitle(): this {
+    const channel = this.getChannel()
+
+    if (!channel) return this
+
+    const feed = this.getFeed()
+
+    this.title = channel.name
+    if (feed && !feed.is_main) {
+      this.title += ` ${feed.name}`
+    }
+
+    return this
+  }
+
+  normalizeURL() {
+    this.url = normalizeURL(this.url)
+  }
+
+  getLogos(): Collection<sdk.Models.Logo> {
+    const logos = super.getLogos()
+
+    if (logos.isEmpty()) return new Collection()
+
+    function format(logo: sdk.Models.Logo): number {
+      const levelByFormat = { SVG: 0, PNG: 3, APNG: 1, WebP: 1, AVIF: 1, JPEG: 2, GIF: 1 }
+
+      return logo.format ? levelByFormat[logo.format] : 0
+    }
+
+    function size(logo: sdk.Models.Logo): number {
+      return Math.abs(512 - logo.width) + Math.abs(512 - logo.height)
+    }
+
+    return logos.sortBy([format, size], ['desc', 'asc'], false)
+  }
+
+  getFilepath(): string {
+    return this.filepath || ''
+  }
+
+  getFilename(): string {
+    return path.basename(this.getFilepath())
+  }
+
+  getLine(): number {
+    return this.line || -1
+  }
+
+  getTvgId(): string {
+    if (this.tvgId) return this.tvgId
+
+    return this.getId()
+  }
+
+  getTvgLogo(): string {
+    const logo = this.getLogos().first()
+
+    return logo ? logo.url : ''
+  }
+
+  getTitle(options: PlaylistOptions): string {
+    const raw = options.raw || false
+    let title = ''
+    if (raw) {
+      title += this.title
+    } else {
+      if (!this.hasUniqueName) {
+        title += this.channelUniqueName
+      } else {
+        title += this.channelName
+      }
+      if (this.feedName && !this.hasMainFeed) title += ' ' + this.feedName
+    }
+
+    return title
+  }
+
+  getFullTitle(options: PlaylistOptions): string {
+    let title = this.getTitle(options)
+
+    if (this.quality) {
+      title += ` (${this.quality})`
+    }
+
+    const labels = this.getLabels()
+
+    if (labels.length) {
+      title += ` [${labels.join(';')}]`
+    }
+
+    return title
+  }
+
+  getLabels(): string[] {
+    const labels: string[] = []
+    if (this.isNot247 === true) {
+      labels.push('Not 24/7')
+    }
+
+    if (this.isGeoBlocked === true) {
+      labels.push('Geo-blocked')
+    }
+
+    return labels
+  }
+
+  toString(options: PlaylistOptions = {}) {
+    options = { ...{ public: false, raw: false }, ...options }
+
+    let output = `#EXTINF:-1 tvg-id="${this.getTvgId()}"`
+
+    if (options.public) {
+      output += ` tvg-logo="${this.getTvgLogo()}"`
+
+      if (this.referrer) {
+        output += ` http-referrer="${this.referrer}"`
+      }
+
+      if (this.user_agent) {
+        output += ` http-user-agent="${this.user_agent}"`
+      }
+
+      output += ` group-title="${this.groupTitle}"`
+    }
+
+    output += `,${this.getFullTitle(options)}`
+
+    if (this.referrer) {
+      output += `\r\n#EXTVLCOPT:http-referrer=${this.referrer}`
+    }
+
+    if (this.user_agent) {
+      output += `\r\n#EXTVLCOPT:http-user-agent=${this.user_agent}`
+    }
+
+    output += `\r\n${this.url}`
+
+    return output
+  }
+
+  toObject(): sdk.Types.StreamData {
+    let feedId = this.feed
+    if (!feedId) {
+      const feed = this.getFeed()
+      if (feed) feedId = feed.id
+    }
+
+    return {
+      channel: this.channel,
+      feed: feedId,
+      title: this.title,
+      url: this.url,
+      quality: this.quality,
+      labels: this.getLabels(),
+      user_agent: this.user_agent,
+      referrer: this.referrer
+    }
+  }
+
+  clone(): Stream {
+    return Object.assign(Object.create(Object.getPrototypeOf(this)), this)
+  }
+}

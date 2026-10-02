@@ -1,0 +1,44 @@
+{
+  "favorites": [],
+  "recent": [
+    {
+      "key": "00sReplay.us",
+      "name": "00s Replay"
+    },
+    {
+      "key": "Tokusato.us",
+      "name": "Tokusato"
+    },
+    {
+      "key": "MBC1USA.us",
+      "name": "MBC 1 USA"
+    },
+    {
+      "key": "USANetworkLatinAmerica.us",
+      "name": "USA Network Latin America"
+    },
+    {
+      "key": "24HourFreeMovies.us",
+      "name": "24 Hour Free Movies"
+    },
+    {
+      "key": "us:wwe superstar central",
+      "name": "WWE Superstar Central"
+    },
+    {
+      "key": "LamoreRockShowWebTV.br",
+      "name": "Lamore Rock Show WebTV"
+    },
+    {
+      "key": "us:21 jump street",
+      "name": "21 Jump Street"
+    },
+    {
+      "key": "cn:1",
+      "name": "\u767e\u4e8b\u901a\u4f53\u80b21"
+    }
+  ],
+  "settings": {
+    "adult": true
+  }
+}
